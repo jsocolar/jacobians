@@ -1,0 +1,141 @@
+---
+title: "Jacobian adjustments explained simply"
+author: "Jacob Socolar"
+date: "April 2021"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Jacobian adjustments are a persistent source of confusion for applied Bayesian modelers. What do they do? When are they necessary? Most explanations floating around the internet assume familiarity with the idea that nonlinear transformations cause "distortion" that requires an "adjustment for the curvature." If this is you, read no further. Instead, ponder the implications of [integration by substitution](https://en.wikipedia.org/wiki/Integration_by_substitution) for probability density functions. Or for a treatment that explicitly links probability distributions, probability density functions, and Jacobian adjustments, check out [Michael Betancourt on probability theory](https://betanalpha.github.io/assets/case_studies/probability_theory.html#42_probability_density_functions) (*highly* recommended!). For Stan-specific treatments, check out the [Users Guide](https://mc-stan.org/docs/2_26/stan-users-guide/changes-of-variables.html) or [Kazuki Yoshida's explanation](http://rstudio-pubs-static.s3.amazonaws.com/486816_440106f76c944734a7d4c84761e37388.html).
+
+If these treatments leave you confused, don't despair! We can build strong intuition about Jacobian adjustments by setting aside most of the math and just reasoning about the probability densities in your model. The math won't get any worse than taking a derivative. Best of all, you'll gain a deeper understanding of what it means to "parametrize" a model, and the role of Stan's `parameters` block.
+
+### A motivating example
+Take the following Stan program, a model with no data that places a normal prior on $x$.
+```{stan mod1, output.var = "mod1"}
+parameters{
+  real x;
+}
+model{
+  x ~ std_normal();
+}
+```
+
+Sampling from this model yields a standard normal as the posterior distribution for $x$.
+```{r runMod1, echo=FALSE, results=FALSE, message=FALSE, warning=FALSE}
+library(rstan)
+set.seed(1)
+normal_samples <- sampling(mod1, chains = 4, iter=2000)
+hist(as.data.frame(extract(normal_samples, permuted=FALSE))$`chain:1.x`, 
+     main = "posterior frequency", xlab = "x", ylab = "", yaxt = 'n')
+```
+
+But now consider this next model, which appears to place a standard normal prior on $e^x + \frac{x}{10}$. This seems like an obscure choice for a tranform, but I promise I have my reasons^[In particular, I wanted a nonlinear transform whose domain and range both cover the entire real line (so either one can be normally distributed), whose derivative is strictly positive, and whose derivative is asymmetric about $x=0$ (so that a standard normal will be _obviously_ distorted, rather than just too light- or heavy-tailed). I wish I could think of a function that meets these constraints and also has a simple closed-form inverse. Feel free to send me suggestions.].
+
+```{stan mod2, output.var = "mod2"}
+parameters{
+  real x;
+}
+transformed parameters{
+  real y = exp(x) + x/10;
+}
+model{
+  y ~ std_normal();
+}
+```
+
+We get divergent transitions when we fit this thing, indicating that we've done something nasty to the posterior geometry, but we can eliminate the divergences and get a trustworthy posterior by increasing adapt_delta to $0.999$. When we do, we see that the posterior for $y = e^x + \frac{x}{10}$ is not a standard normal! This post is the story of where that normal distribution went and how we can get it back.
+```{r runMod2, echo=FALSE, results=FALSE, message=FALSE, warning=FALSE}
+messed_up_samples <- sampling(mod2, chains = 4, control=list(adapt_delta=0.999), iter=2000)
+hist(as.data.frame(extract(messed_up_samples, permuted=FALSE))$`chain:1.y`, 
+     main = "posterior frequency", xlab = "y", ylab = "", yaxt = 'n')
+```
+
+### The target density
+For a given parametrization, a posterior distribution is encoded by a probability density function (PDF) over the parameters.^[There is a technical but fundamental difference between a probability distribution and a PDF that encodes it. For further reading see https://betanalpha.github.io/assets/case_studies/probability_theory.html]. The goal of MCMC sampling is to draw samples from this posterior PDF. The purpose of a Stan program is to specify a density function that is proportional to the posterior PDF. Stan calls this density the *target density*.
+
+In a Stan program, "sampling statements" like `x ~ std_normal()` serve to modify the target density (in this case multiplying it by the PDF associated with $Normal(0,1)$^[Strictly speaking, the sampling statement multiplies the target density by some unnormalized function proportional to the probability density function. Since MCMC sampling ultimately requires something that is merely *proportional* to the posterior, normalizing constants don't matter. For simplicity, I will refer to the unnormalized densities as "PDFs" even though this isn't strictly accurate.]). 
+
+An important aside here is that Stan doesn't work directly with the target density, but rather with its logarithm. Thus, rather than multiplying the target density by a PDF, what Stan's sampling statements *really* do is to add the logarithm of a PDF to the logarithm of the target density. With that in mind, it's time to introduce a really cool piece of Stan syntax: `target +=`. In Stan, the logarithm of the target density is stored in a variable called `target`, and `+=` means to take the variable on the left and increment it by the variable on the right.^[This convention is borrowed from C(++).] Thus, instead of writing `x ~ std_normal()`, we could instead choose to write `target += normal_lpdf(x | 0, 1)`, which in English means "increment the logarithm of the target density by the logarithm of the PDF (as a function of $x$) that encodes $Normal(0,1)$".
+
+Since the target density just needs to be *proportional to* the posterior, it doesn't matter where the target density "starts" (before it gets incremented). Stan initializes the target density at 1 (i.e. it initializes the log density at 0), but it could just as well start at any positive value *as long as the initial density is flat*.^[You can see this for yourself: add `target += k`, where `k` is any real-valued constant, to the model block of any Stan program and observe that the posterior does not change.]
+
+### Transforming uniform densities
+When we apply a nonlinear transform to a parameter with a uniform density, the density of the transform is not uniform. Let's take a look at $y=e^x + \frac{x}{10}$. Look at how equal intervals of $x$ transform to unequal intervals of $y$.
+```{R density, echo=FALSE, fig.width=5}
+x <- seq(-1,1, length.out = 100)
+x_trans <- function(x){exp(x) + x/10}
+y <- x_trans(x)
+plot(y ~ x, type = "l", asp=1, ylab = "y = exp(x) + x/10", xlim = c(-2,1))
+for(i in -4:4){
+  polygon(x=c(.1+.2*i, .2*i, seq(.2*i, .1+.2*i, length.out = 26)), y = c(-1, -1, x_trans(seq(.2*i, .1+.2*i, length.out = 26))), col = "gray", border = "gray")
+  polygon(x=c(-2, -2, seq(.2*i, .1+.2*i, length.out = 26)), y=c(x_trans(.1+.2*i),x_trans(.2*i), x_trans(seq(.2*i, .1+.2*i, length.out = 26))), col="gray", border = "gray")
+}
+abline(v=1, col="gray")
+abline(h=0, col="black")
+lines(y ~ x, type = "l", asp=1)
+```
+
+A uniform density on $x$ means that equal-sized intervals of $x$ contain the same probability mass. Since these equal probability masses are allocated to different-sized intervals of $y=e^x + \frac{x}{10}$, the probability density on $y$ is not uniform. The average probability density over any interval of $y$ is related to the probability density over the corresponding interval of $x$ by a factor of the reciprocal of the absolute value of the average slope of $f(x)=e^x + \frac{x}{10}$ over the interval (the width of the vertical bars divided by the width of the horizontal bars). In the limit of small intervals, the absolute value of the average slope is the absolute value derivative of $e^x + \frac{x}{10}$ with respect to $x$, i.e. $\left|\frac{dy}{dx}\right|$. So the probability density on $y$ is related to the probability density on $x$ by a factor of $\frac{1}{\left|\frac{dy}{dx}\right|}$.
+
+### Two ways to put it all together
+#### Thinking "backwards"
+To think "backwards" we begin at the desired result: a Gaussian density over $y = e^x + \frac{x}{10}$. What is the corresponding density over $x$? Well, $y$ transforms back to $x$ via the inverse transform $x = f^{-1}(y) = 10y - W(10e^{10y})$ (here $W$ is the Lambert W function, but what's important is just to keep track of the fact that we are dealing with the inverse $f^{-1}$ ^[Note that Jacobian adjustments only work for invertible transformations. For univariate transformations, it is common to see the requirements listed as "monotonic and continuously differentiable"; this is precisely equivalent to "invertible and continously differentiable."]). We've already figured out how to propagate densities through nonlinear transformations (see *Transforming uniform densities* above). To transform a density on $y = e^x + \frac{x}{10}$ to a density on $x = f^{-1}(y)$, we need to multiply by a factor of $\frac{1}{\left|\frac{dx}{xy}\right|} = \left|\frac{dy}{dx}\right|$. So to write down the desired density over $x$, we need to multiply the Gaussian density over $y = f(x)$ by $\left|\frac{dy}{dx}\right|$. This is the Jacobian adjustment.^[On the log scale, we add rather than multiplying.]
+
+#### Thinking "forwards"
+To think "forwards" we begin with a uniform density on $x$. As we've seen, this uniform density induces a density on $y=e^x + \frac{x}{10}$ proportional to $\frac{1}{\left|\frac{dy}{dx}\right|}$. So when we begin incrementing the target density for $y$, the increment does exactly what we expect, but it is modifying the wrong *starting point* for the target density because a flat initial density on $x$ induces an initial density for $y$ that is *not flat*. If we want to start from a flat target density for $e^x+\frac{x}{10}$, we need to apply a correction to flatten out the target. We achieve this by multiplying by $\left|\frac{dy}{dx}\right|$. This, again, is the Jacobian adjustment.
+
+I like thinking "forwards" because it lays bare the importance of the parameters block in a Stan model. Declaring parameter `x` is more than simply telling Stan to look for a variable called `x` further down in the code.  It is also telling Stan to put an (improper) flat prior on `x` as the starting point from which all further sampling statements proceed. I cannot say this enough: *the parameters block is where we choose the parameterization of our model*, and the this choice matters *a lot*. Not only does it matter for the efficiency of our sampling and the "niceness" of our posterior geometry; *it also plays a big role in specifing our priors*!
+
+Did I mention that I can't say this enough?  I'll say it again: the critical piece of intuition here is that declaring parameters (i.e. *choosing a parameterization for the model*) is not merely a synactic quirk that's necessary to placate Stan's compiler. *It is part of the prior specification*. Choosing the parameterization amounts to choosing an intial set of improper flat priors which are the baseline that gets modified by the remainder of the model, including any explicit priors. 
+
+### Yes, it works
+This probably wouldn't be complete if I didn't show that the Jacobian adjustment works as intended. So here we go:
+```{stan mod3, output.var = "mod3"}
+parameters{
+  real x;
+}
+transformed parameters{
+  real y = exp(x) + x/10;
+}
+model{
+  y ~ std_normal();
+  target += log(exp(x) + .1); // this is the Jacobian adjustment
+}
+```
+
+```{r runMod3, echo=FALSE, results=FALSE, message=FALSE, warning=FALSE}
+fixed_samples <- sampling(mod3, chains = 4, control=list(adapt_delta=0.999), iter=2000)
+hist(as.data.frame(extract(fixed_samples, permuted=FALSE))$`chain:1.y`, 
+     main = "posterior frequency", xlab = "y", ylab = "", yaxt = 'n')
+```
+
+### When we don't need a Jacobian
+Let's return to our model that went awry:
+```{stan original, output.var="modorig", eval=FALSE}
+parameters{
+  real x;
+}
+transformed parameters{
+  real y = exp(x) + x/10;
+}
+model{
+  y ~ std_normal();
+}
+```
+```{r plotMod2, echo=FALSE, results=FALSE, message=FALSE, warning=FALSE}
+hist(as.data.frame(extract(messed_up_samples, permuted=FALSE))$`chain:1.y`, 
+     main = "posterior frequency", xlab = "y", ylab = "", yaxt = 'n')
+```
+
+We expected to recover a normal posterior distribution for $y$, and instead we got something different. Somewhere out there, perhaps there's a statement of domain expertise that is encoded by this weird distribution. If you find yourself in such a situation, where you can abuse Stan's sampling statements to write down a non-generative prior^[Non-generative in the sense that you have not identified a normalized PDF that corresponds to the prior that you are putting on either $y$ or $x$.] that encapsulates your domain expertise, there's nothing formally wrong with that. But you'd better be really careful that you're actually getting the prior that you intend; there are many subtle ways for this to go awry.
+
+### Conclusion
+Jacobian adjustments are necessary when we sample nonlinear transforms and we want the sampling statements to mean what they appear to say (i.e. we want our prior to correspond to the ordinary meaning of the top-level sampling statements in our model).  Here, we've built intuition based on the idea of "flattening out" the starting point for the target density, and we've seen that the parameters block is not just a syntactic hurdle but rather a fundamental part of a Bayesian model--it's where we choose the parameterization. For further reading I highly recommend Michael Betancourt's short [introduction to probability theory](https://betanalpha.github.io/assets/case_studies/probability_theory.html), geared towards applied statistical modelers.
