@@ -19,6 +19,7 @@ If these treatments leave you confused, don't despair! We can build strong intui
 
 ### A motivating example
 Take the following Stan program, a model with no data that places a normal prior on $x$.
+
 ```{stan mod1, output.var = "mod1"}
 parameters{
   real x;
@@ -29,6 +30,7 @@ model{
 ```
 
 Sampling from this model yields a standard normal as the posterior distribution for $x$.
+
 ```{r runMod1, echo=FALSE, results=FALSE, message=FALSE, warning=FALSE}
 library(rstan)
 set.seed(1)
@@ -71,7 +73,8 @@ An important aside here is that Stan doesn't work directly with the target densi
 Since the target density just needs to be *proportional to* the posterior, it doesn't matter where the target density "starts" (before it gets incremented). Stan initializes the target density at 1 (i.e. it initializes the log density at 0), but it could just as well start at any positive value *as long as the initial density is flat*.^[You can see this for yourself: add `target += k`, where `k` is any real-valued constant, to the model block of any Stan program and observe that the posterior does not change.]
 
 ### Transforming uniform densities
-When we apply a nonlinear transform to a parameter with a uniform density, the density of the transform is not uniform. Let's take a look at $y=e^x + \frac{x}{10}$. Look at how equal intervals of $x$ transform to unequal intervals of $y$.
+When we apply a nonlinear transform to a parameter with a uniform density, the density of the transform is not uniform. Let's take a look at $y=f(x)=e^x + \frac{x}{10}$. Look at how equal intervals of $x$ transform to unequal intervals of $y$.
+
 ```{R density, echo=FALSE, fig.width=5}
 x <- seq(-1,1, length.out = 100)
 x_trans <- function(x){exp(x) + x/10}
@@ -86,7 +89,7 @@ abline(h=0, col="black")
 lines(y ~ x, type = "l", asp=1)
 ```
 
-A uniform density on $x$ means that equal-sized intervals of $x$ contain the same probability mass. Since these equal probability masses are allocated to different-sized intervals of $y=e^x + \frac{x}{10}$, the probability density on $y$ is not uniform. The average probability density over any interval of $y$ is related to the probability density over the corresponding interval of $x$ by a factor of the reciprocal of the absolute value of the average slope of $f(x)=e^x + \frac{x}{10}$ over the interval (the width of the vertical bars divided by the width of the horizontal bars). In the limit of small intervals, the absolute value of the average slope is the absolute value derivative of $e^x + \frac{x}{10}$ with respect to $x$, i.e. $\left|\frac{dy}{dx}\right|$. So the probability density on $y$ is related to the probability density on $x$ by a factor of $\frac{1}{\left|\frac{dy}{dx}\right|}$.
+A uniform density on $x$ means that equal-sized intervals of $x$ contain the same probability mass. Since these equal probability masses are allocated to different-sized intervals of $y=e^x + \frac{x}{10}$, the probability density on $y$ is not uniform. The average probability density over any interval of $y$ is related to the probability density over the corresponding interval of $x$ by a factor of the width of the vertical bars divided by the height of the horizontal bars. That's the reciprocal of the absolute value of the average slope of $f(x)$ over the interval. In the limit of small intervals, the absolute value of the average slope is the absolute value derivative of $e^x + \frac{x}{10}$ with respect to $x$, i.e. $\left|\frac{dy}{dx}\right|$. So the probability density on $y$ is related to the probability density on $x$ by a factor of $\frac{1}{\left|\frac{dy}{dx}\right|}$.
 
 ### Two ways to put it all together
 I call the two ways of putting things together "thinking backwards" and "thinking forwards." If you like to reason by manipulating mathematical formulae, then "backwards" might be easier for you. If you are more comfortable reasoning by analogy than by analysis, "forwards" might be especially clarifying (it is for me!).
@@ -103,6 +106,7 @@ Did I mention that I can't say this enough?  I'll say it again: the critical pie
 
 ### Yes, it works
 This probably wouldn't be complete if I didn't show that the Jacobian adjustment works as intended. So here we go:
+
 ```{stan mod3, output.var = "mod3"}
 parameters{
   real x;
@@ -124,6 +128,7 @@ hist(as.data.frame(extract(fixed_samples, permuted=FALSE))$`chain:1.y`,
 
 ### When we don't need a Jacobian
 Let's return to our model that went awry:
+
 ```{stan original, output.var="modorig", eval=FALSE}
 parameters{
   real x;
